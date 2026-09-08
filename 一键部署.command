@@ -6,7 +6,7 @@ REPO_NAME="neovora-audio-cloud"
 clear
 
 echo "============================================================"
-echo " NEOVORA Audio Cloud v3.0.2 · 一键完整部署"
+echo " NEOVORA Audio Cloud v3.0.3 · 一键完整部署"
 echo " GitHub + Cloudflare Workers"
 echo "============================================================"
 
@@ -84,7 +84,7 @@ rsync -a --delete \
 cd "$SYNC_DIR"
 git add -A
 if ! git diff --cached --quiet; then
-  git -c user.name="$GH_USER" -c user.email="$GH_USER@users.noreply.github.com" commit -m "NEOVORA Audio Cloud v3.0.2"
+  git -c user.name="$GH_USER" -c user.email="$GH_USER@users.noreply.github.com" commit -m "NEOVORA Audio Cloud v3.0.3"
   git push -u origin main
 else
   echo "GitHub 无代码变化，跳过 commit。"
@@ -110,7 +110,23 @@ echo "============================================================"
 echo "GitHub: https://github.com/$FULL_REPO"
 if [ -n "$URL" ]; then
   echo "网站: $URL"
-  command -v open >/dev/null 2>&1 && open "$URL" || true
+  echo "正在执行线上模型链路自检…"
+  HEALTH_URL="${URL%/}/api/model-health"
+  for attempt in 1 2 3 4 5 6; do
+    sleep 3
+    if HEALTH_JSON="$(curl -fsS --max-time 25 "$HEALTH_URL" 2>/dev/null)"; then
+      echo "模型链路自检通过: $HEALTH_URL"
+      break
+    fi
+    if [ "$attempt" -eq 6 ]; then
+      echo "警告：网站已部署，但模型链路自检未通过。"
+      echo "请打开: $HEALTH_URL"
+      echo "并把页面内容截图发给我；不要继续反复测试音频。"
+    else
+      echo "等待 Cloudflare 新版本生效… ($attempt/6)"
+    fi
+  done
+  command -v open >/dev/null 2>&1 && open "${URL%/}/app" || true
 else
   echo "Cloudflare 已完成部署，请以上方 Wrangler 输出的网址为准。"
 fi

@@ -3,11 +3,14 @@ import { pipeline, env } from '@huggingface/transformers';
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 env.remoteHost = `${self.location.origin}/hf/`;
-env.remotePathTemplate = '{model}/resolve/{revision}/{file}';
+// Transformers.js 3.x appends the requested filename itself.
+// IMPORTANT: do not include {file} here or URLs become .../{file}/config.json.
+env.remotePathTemplate = '{model}/resolve/{revision}/';
 
 let transcriber = null;
 let translator = null;
 let transcriberModel = null;
+let translatorDevice = null;
 
 const WHISPER_MODELS = {
   tiny: 'onnx-community/whisper-tiny',
@@ -36,12 +39,13 @@ async function getTranscriber(modelKey, device) {
 }
 
 async function getTranslator(device) {
-  if (!translator) {
+  if (!translator || translatorDevice !== device) {
     translator = await pipeline('translation', 'Xenova/m2m100_418M', {
       device,
       dtype: device === 'webgpu' ? 'q8' : 'q8',
       progress_callback: progress('translate')
     });
+    translatorDevice = device;
   }
   return translator;
 }

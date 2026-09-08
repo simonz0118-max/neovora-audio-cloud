@@ -1,6 +1,30 @@
+
+const HEALTH_TARGETS = [
+  ['Whisper config', 'onnx-community/whisper-base/resolve/main/config.json'],
+  ['Whisper preprocessor', 'onnx-community/whisper-base/resolve/main/preprocessor_config.json'],
+  ['M2M100 config', 'Xenova/m2m100_418M/resolve/main/config.json'],
+  ['M2M100 tokenizer', 'Xenova/m2m100_418M/resolve/main/tokenizer_config.json'],
+];
+
+async function probeModel(path) {
+  const url = `https://huggingface.co/${path}`;
+  try {
+    const r = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-0', 'User-Agent': 'NEOVORA-Audio/3.0.3' }, redirect: 'follow' });
+    // HF may answer 200 when Range is ignored, or 206 when honored.
+    return { path, ok: r.ok || r.status === 206, status: r.status, contentType: r.headers.get('content-type') || '' };
+  } catch (e) {
+    return { path, ok: false, status: 0, error: String(e) };
+  }
+}
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === '/api/model-health') {
+      const checks = await Promise.all(HEALTH_TARGETS.map(async ([name, path]) => ({ name, ...(await probeModel(path)) })));
+      const ok = checks.every(x => x.ok);
+      return Response.json({ ok, version: '3.0.3', checks }, { status: ok ? 200 : 503, headers: { 'cache-control': 'no-store' } });
+    }
 
     if (url.pathname.startsWith('/hf/')) {
       const upstreamPath = url.pathname.slice('/hf/'.length);
@@ -14,7 +38,7 @@ export default {
         const value = request.headers.get(name);
         if (value) headers.set(name, value);
       }
-      headers.set('user-agent', 'NEOVORA-Audio/3.0.1');
+      headers.set('user-agent', 'NEOVORA-Audio/3.0.3');
 
       let response;
       try {

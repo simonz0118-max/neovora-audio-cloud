@@ -1,7 +1,7 @@
 {
   "name": "neovora-audio-cloud",
   "private": true,
-  "version": "3.0.1",
+  "version": "3.0.3",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 8788",
