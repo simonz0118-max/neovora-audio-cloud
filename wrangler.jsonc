@@ -2,10 +2,14 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "neovora-audio",
   "main": "src/cloudflare-worker.js",
-  "compatibility_date": "2026-08-25",
+  "compatibility_date": "2026-09-08",
+  "ai": {
+    "binding": "AI"
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
   }
 }

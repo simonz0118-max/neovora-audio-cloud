@@ -1,134 +1,101 @@
-#!/bin/zsh
-set -e
+#!/bin/bash
+set -Eeuo pipefail
+
 cd "$(dirname "$0")"
 PROJECT_DIR="$PWD"
 REPO_NAME="neovora-audio-cloud"
-clear
 
-echo "============================================================"
-echo " NEOVORA Audio Cloud v3.0.3 · 一键完整部署"
-echo " GitHub + Cloudflare Workers"
-echo "============================================================"
+trap 'echo; echo "部署中止。错误发生在第 $LINENO 行。请把终端最后 30 行截图发给我。"; read -r -p "按回车关闭窗口..." _' ERR
 
-pause_on_error() {
-  echo "\n部署失败。请把上面的终端内容截图发给我。"
-  read -n 1
-}
-trap pause_on_error ERR
+line(){ printf '\n============================================================\n%s\n============================================================\n' "$1"; }
 
-# 1. 基础依赖
+line "1/5 检查一键部署环境"
 if ! command -v brew >/dev/null 2>&1; then
-  echo "[1/7] 安装 Homebrew…"
+  echo "首次运行：安装 Homebrew..."
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  if [ -x /opt/homebrew/bin/brew ]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-  elif [ -x /usr/local/bin/brew ]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-  fi
-else
-  echo "[1/7] Homebrew 已就绪"
+  if [ -x /opt/homebrew/bin/brew ]; then eval "$(/opt/homebrew/bin/brew shellenv)"; fi
 fi
+if ! command -v node >/dev/null 2>&1; then brew install node; fi
+if ! command -v gh >/dev/null 2>&1; then brew install gh; fi
+if ! command -v git >/dev/null 2>&1; then brew install git; fi
+node -v
+npm -v
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "[2/7] 安装 Node.js…"
-  brew install node
-else
-  echo "[2/7] Node.js 已就绪: $(node -v)"
-fi
+line "2/5 安装依赖并构建"
+npm install
+npm run build
 
-if ! command -v gh >/dev/null 2>&1; then
-  echo "[3/7] 安装 GitHub CLI…"
-  brew install gh
-else
-  echo "[3/7] GitHub CLI 已就绪"
-fi
+echo "✓ 网站构建成功"
 
-# 2. GitHub 登录
-echo "[4/7] 检查 GitHub 登录…"
-if ! gh auth status >/dev/null 2>&1; then
-  echo "首次使用需要在浏览器完成一次 GitHub 授权。"
+line "3/5 GitHub 自动备份"
+if ! gh auth status -h github.com >/dev/null 2>&1; then
+  echo "首次使用需要在浏览器授权 GitHub。"
   gh auth login -h github.com -p https -w
 fi
 GH_USER="$(gh api user --jq .login)"
 FULL_REPO="$GH_USER/$REPO_NAME"
-
-# 3. 安装依赖并构建
-cd "$PROJECT_DIR"
-echo "[5/7] 安装依赖并构建网站…"
-npm install
-npm run build
-
-# 4. GitHub 同步。已有仓库时先 clone，再覆盖源码，避免 unrelated-history / push 冲突。
-echo "[6/7] 同步 GitHub: $FULL_REPO"
-TMP_ROOT="$(mktemp -d)"
-SYNC_DIR="$TMP_ROOT/repo"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
 if gh repo view "$FULL_REPO" >/dev/null 2>&1; then
-  gh repo clone "$FULL_REPO" "$SYNC_DIR" -- --quiet
+  gh repo clone "$FULL_REPO" "$TMP_DIR/repo" -- --quiet
 else
-  gh repo create "$FULL_REPO" --public --description "NEOVORA Audio transcription and translation web app"
-  mkdir -p "$SYNC_DIR"
-  git -C "$SYNC_DIR" init -q
-  git -C "$SYNC_DIR" branch -M main
-  git -C "$SYNC_DIR" remote add origin "https://github.com/$FULL_REPO.git"
+  mkdir -p "$TMP_DIR/repo"
+  git -C "$TMP_DIR/repo" init -q
+  git -C "$TMP_DIR/repo" branch -M main
+  gh repo create "$FULL_REPO" --public --description "NEOVORA Audio public cloud transcription and translation" --confirm >/dev/null
+  git -C "$TMP_DIR/repo" remote add origin "https://github.com/$FULL_REPO.git"
 fi
 
-# 保留远端 .git，仅同步产品源码；不上传构建缓存和 node_modules。
 rsync -a --delete \
-  --exclude='.git' \
-  --exclude='node_modules' \
-  --exclude='dist' \
-  --exclude='.wrangler' \
-  "$PROJECT_DIR/" "$SYNC_DIR/"
+  --exclude '.git/' \
+  --exclude 'node_modules/' \
+  --exclude 'dist/' \
+  --exclude '.wrangler/' \
+  --exclude '.DS_Store' \
+  "$PROJECT_DIR/" "$TMP_DIR/repo/"
 
-cd "$SYNC_DIR"
-git add -A
-if ! git diff --cached --quiet; then
-  git -c user.name="$GH_USER" -c user.email="$GH_USER@users.noreply.github.com" commit -m "NEOVORA Audio Cloud v3.0.3"
-  git push -u origin main
+git -C "$TMP_DIR/repo" add -A
+if ! git -C "$TMP_DIR/repo" diff --cached --quiet; then
+  git -C "$TMP_DIR/repo" -c user.name="NEOVORA Deploy" -c user.email="deploy@neovora.local" commit -m "Deploy NEOVORA Audio V4.1 Cloud" >/dev/null
+  git -C "$TMP_DIR/repo" push -u origin main
+  echo "✓ GitHub 备份完成"
 else
-  echo "GitHub 无代码变化，跳过 commit。"
+  echo "✓ GitHub 无变化，无需重复提交"
 fi
-rm -rf "$TMP_ROOT"
 
-# 5. Cloudflare 部署
-cd "$PROJECT_DIR"
-echo "[7/7] 部署 Cloudflare Workers…"
+line "4/5 Cloudflare 登录与公网部署"
 if ! npx wrangler whoami >/dev/null 2>&1; then
-  echo "首次使用需要在浏览器完成一次 Cloudflare 授权。"
+  echo "首次使用需要在浏览器授权 Cloudflare。"
   npx wrangler login
 fi
 
-npm run build
-DEPLOY_OUTPUT="$(npx wrangler deploy 2>&1 | tee /dev/tty)"
+DEPLOY_LOG="$(mktemp)"
+npx wrangler deploy 2>&1 | tee "$DEPLOY_LOG"
+SITE_URL="$(grep -Eo 'https://[^ ]+\.workers\.dev' "$DEPLOY_LOG" | tail -1 || true)"
+rm -f "$DEPLOY_LOG"
 
-URL="$(printf '%s\n' "$DEPLOY_OUTPUT" | grep -Eo 'https://[^ ]+\.workers\.dev[^ ]*' | tail -1 || true)"
+echo "✓ Cloudflare Worker + Workers AI 已部署"
 
-echo "\n============================================================"
-echo " 部署完成"
-echo "============================================================"
-echo "GitHub: https://github.com/$FULL_REPO"
-if [ -n "$URL" ]; then
-  echo "网站: $URL"
-  echo "正在执行线上模型链路自检…"
-  HEALTH_URL="${URL%/}/api/model-health"
-  for attempt in 1 2 3 4 5 6; do
-    sleep 3
-    if HEALTH_JSON="$(curl -fsS --max-time 25 "$HEALTH_URL" 2>/dev/null)"; then
-      echo "模型链路自检通过: $HEALTH_URL"
-      break
-    fi
-    if [ "$attempt" -eq 6 ]; then
-      echo "警告：网站已部署，但模型链路自检未通过。"
-      echo "请打开: $HEALTH_URL"
-      echo "并把页面内容截图发给我；不要继续反复测试音频。"
-    else
-      echo "等待 Cloudflare 新版本生效… ($attempt/6)"
-    fi
-  done
-  command -v open >/dev/null 2>&1 && open "${URL%/}/app" || true
+line "5/5 公网健康检查"
+if [ -n "$SITE_URL" ]; then
+  sleep 3
+  HEALTH="$(curl -fsS "$SITE_URL/api/health" || true)"
+  if echo "$HEALTH" | grep -q '"ok":true'; then
+    echo "✓ 公网 AI 节点健康检查通过"
+  else
+    echo "⚠ Worker 已部署，但健康检查未确认成功。"
+    echo "返回内容：$HEALTH"
+  fi
 else
-  echo "Cloudflare 已完成部署，请以上方 Wrangler 输出的网址为准。"
+  echo "⚠ Wrangler 已部署成功，但未能从终端输出自动解析 workers.dev 地址。"
 fi
-echo "\n以后更新版本，只需要再次双击：一键部署.command"
-read -n 1
+
+echo
+echo "GitHub: https://github.com/$FULL_REPO"
+if [ -n "$SITE_URL" ]; then echo "网站: $SITE_URL/app"; fi
+echo
+echo "V4.1 Cloud 不启动任何本地 AI 服务；关闭本终端和 Mac 都不影响已部署网站。"
+if [ -n "$SITE_URL" ]; then open "$SITE_URL/app" >/dev/null 2>&1 || true; fi
+
+read -r -p "部署完成。按回车关闭窗口..." _
