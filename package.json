@@ -1,7 +1,7 @@
 {
   "name": "neovora-audio-cloud",
   "private": true,
-  "version": "3.0.0",
+  "version": "3.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 8788",
@@ -12,7 +12,7 @@
   "dependencies": {
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
-    "@huggingface/transformers": "^3.7.3",
+    "@huggingface/transformers": "^3.8.1",
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

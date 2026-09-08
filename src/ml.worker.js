@@ -2,6 +2,8 @@ import { pipeline, env } from '@huggingface/transformers';
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+env.remoteHost = `${self.location.origin}/hf/`;
+env.remotePathTemplate = '{model}/resolve/{revision}/{file}';
 
 let transcriber = null;
 let translator = null;
@@ -25,7 +27,7 @@ async function getTranscriber(modelKey, device) {
   if (!transcriber || transcriberModel !== `${model}:${device}`) {
     transcriber = await pipeline('automatic-speech-recognition', model, {
       device,
-      dtype: device === 'webgpu' ? 'fp16' : 'q8',
+      dtype: device === 'webgpu' ? 'q8' : 'q8',
       progress_callback: progress('whisper')
     });
     transcriberModel = `${model}:${device}`;
@@ -37,7 +39,7 @@ async function getTranslator(device) {
   if (!translator) {
     translator = await pipeline('translation', 'Xenova/m2m100_418M', {
       device,
-      dtype: device === 'webgpu' ? 'fp16' : 'q8',
+      dtype: device === 'webgpu' ? 'q8' : 'q8',
       progress_callback: progress('translate')
     });
   }
@@ -86,6 +88,6 @@ self.onmessage = async (event) => {
     }
     throw new Error('未知任务');
   } catch (error) {
-    self.postMessage({ id, type: 'error', action, error: error?.message || String(error) });
+    self.postMessage({ id, type: 'error', action, error: `${error?.name ? error.name + ': ' : ''}${error?.message || String(error)}` });
   }
 };

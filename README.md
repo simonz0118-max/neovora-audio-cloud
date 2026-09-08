@@ -29,3 +29,16 @@ NLLB-200 distilled 600M 的公开模型标注为 CC-BY-NC-4.0，不适合商业�
 - facebook/m2m100_418M: MIT（模型页）
 - OpenAI Whisper: 请在正式上线前再次核对所选 ONNX 转换仓库及基础模型许可，并在网站法律页面保留第三方声明。
 - FFmpeg: 商业部署前按最终构建的 FFmpeg 配置核查 LGPL/GPL 义务。
+
+
+## V3.0.1 修复
+- 修复 Cloudflare 线上环境模型下载 `Failed to fetch`。
+- 新增 `/hf/*` Cloudflare 同域模型代理。
+- WebGPU 不可用或初始化失败时自动回退 WASM。
+- Transformers.js 更新至 3.8.1。
+- 模型下载继续使用浏览器缓存。
+
+
+## V3.0.2 部署方式
+
+只需要双击 **`一键部署.command`**。该脚本会自动完成依赖检查、GitHub 同步和 Cloudflare Workers 部署。首次运行 GitHub / Cloudflare 时浏览器会要求授权一次，之后更新版本无需分开部署。
