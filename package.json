@@ -1,0 +1,25 @@
+{
+  "name": "neovora-audio-cloud",
+  "private": true,
+  "version": "3.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 8788",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 8788",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
+    "@huggingface/transformers": "^3.7.3",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7",
+    "wrangler": "^4.32.0"
+  }
+}
