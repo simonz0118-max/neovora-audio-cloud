@@ -60,7 +60,7 @@ rsync -a --delete \
 
 git -C "$TMP_DIR/repo" add -A
 if ! git -C "$TMP_DIR/repo" diff --cached --quiet; then
-  git -C "$TMP_DIR/repo" -c user.name="NEOVORA Deploy" -c user.email="deploy@neovora.local" commit -m "Deploy NEOVORA Audio V4.1.4 Free Google Hybrid" >/dev/null
+  git -C "$TMP_DIR/repo" -c user.name="NEOVORA Deploy" -c user.email="deploy@neovora.local" commit -m "Deploy NEOVORA Audio V4.1.5 Free Hybrid Stable" >/dev/null
   git -C "$TMP_DIR/repo" push -u origin main
   echo "✓ GitHub 备份完成"
 else
@@ -106,7 +106,7 @@ else
   echo "HTTP: $HTTP_CODE"
   echo "返回内容：$HEALTH"
   echo
-  echo "V4.1.4 使用 Cloudflare 的 default AI Gateway；它应由首次经过认证的 Workers AI binding 请求自动创建。"
+  echo "V4.1.5 使用 Cloudflare 的 default AI Gateway；它应由首次经过认证的 Workers AI binding 请求自动创建。"
   echo "如果这里仍出现 2001，请把以上返回内容截图发给我，不要手工改其他配置。"
   exit 1
 fi
@@ -115,6 +115,6 @@ echo
 echo "GitHub: https://github.com/$FULL_REPO"
 echo "网站: $SITE_URL/app"
 echo
-echo "V4.1.4 Free Google Hybrid 为纯公网架构，不启动任何本地 AI 服务；关闭本终端和 Mac 不影响网站。"
+echo "V4.1.5 Free Hybrid Stable 为纯公网架构，不启动任何本地 AI 服务；关闭本终端和 Mac 不影响网站。"
 open "$SITE_URL/app" >/dev/null 2>&1 || true
 read -r -p "部署完成。按回车关闭窗口..." _

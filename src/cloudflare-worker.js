@@ -1,10 +1,14 @@
 const ASR_MODEL = '@cf/openai/whisper-large-v3-turbo';
 const TRANSLATION_MODEL = '@cf/qwen/qwen3-30b-a3b-fp8';
 const FALLBACK_MT_MODEL = '@cf/meta/m2m100-1.2b';
-const GOOGLE_WEB_TRANSLATE_URL = 'https://translate.googleapis.com/translate_a/single';
+const GOOGLE_WEB_TRANSLATE_URLS = [
+  'https://translate.googleapis.com/translate_a/single',
+  'https://translate.google.com/translate_a/single',
+  'https://translate.google.com.hk/translate_a/single',
+];
 const GATEWAY_ID = 'default';
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const VERSION = '4.1.4';
+const VERSION = '4.1.5';
 
 const SUPPORTED_LANGS = new Set([
   'zh','en','fr','es','de','it','pt','ja','ko','ru','ar','nl','pl','tr','uk','cs','sv','fi','da','el','he','hi','id'
@@ -291,12 +295,11 @@ function parseGoogleTranslatePayload(payload) {
     .trim();
 }
 
-async function translateWithGoogleWeb(text, source, target) {
-  const chunks = splitForTranslation(text, 2200);
-  const results = [];
-  for (const chunk of chunks) {
+async function fetchGoogleWebChunk(chunk, source, target) {
+  let lastError = null;
+  for (const endpoint of GOOGLE_WEB_TRANSLATE_URLS) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    const timer = setTimeout(() => controller.abort(), 4500);
     try {
       const params = new URLSearchParams({
         client: 'gtx',
@@ -305,24 +308,34 @@ async function translateWithGoogleWeb(text, source, target) {
         dt: 't',
         q: chunk,
       });
-      const response = await fetch(`${GOOGLE_WEB_TRANSLATE_URL}?${params.toString()}`, {
+      const response = await fetch(`${endpoint}?${params.toString()}`, {
         method: 'GET',
         headers: {
           'accept': 'application/json,text/plain,*/*',
-          'user-agent': 'Mozilla/5.0 NEOVORA-Audio/4.1.4',
+          'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/128 Safari/537.36',
         },
         signal: controller.signal,
       });
-      if (response.status === 429) throw new Error('Google Web Translate 429 Too Many Requests');
-      if (!response.ok) throw new Error(`Google Web Translate HTTP ${response.status}`);
+      if (response.status === 429) throw new Error('429 Too Many Requests');
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       const translated = parseGoogleTranslatePayload(data);
-      if (!translated) throw new Error('Google Web Translate 未返回有效译文');
-      results.push(translated);
+      if (!translated) throw new Error('empty translation');
+      return translated;
+    } catch (e) {
+      lastError = e;
     } finally {
       clearTimeout(timer);
     }
   }
+  throw new Error(`Google Web unavailable: ${String(lastError?.message || lastError || 'unknown')}`);
+}
+
+async function translateWithGoogleWeb(text, source, target) {
+  const chunks = splitForTranslation(text, 1800);
+  const results = [];
+  for (const chunk of chunks) results.push(await fetchGoogleWebChunk(chunk, source, target));
   return results.join('\n\n');
 }
 
@@ -500,8 +513,8 @@ async function handleProcess(request, env) {
       translation = translatedResult.text;
       translation_engine = translatedResult.engine;
       translation_fallback = Boolean(translatedResult.fallback);
-      if (translation_engine === 'quality') warnings.push('Google 免费翻译节点本次不可用，已自动切换到高质量备用翻译。');
-      if (translation_engine === 'fallback') warnings.push('Google 与高质量备用节点均不可用，本次已使用基础翻译兜底。');
+      // Translation provider fallback is intentionally silent in the customer UI.
+      // Engine metadata remains in the JSON response for diagnostics.
     } catch (e) {
       translation_error = String(e?.message || e);
     }
