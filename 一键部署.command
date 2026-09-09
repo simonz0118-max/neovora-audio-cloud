@@ -60,7 +60,7 @@ rsync -a --delete \
 
 git -C "$TMP_DIR/repo" add -A
 if ! git -C "$TMP_DIR/repo" diff --cached --quiet; then
-  git -C "$TMP_DIR/repo" -c user.name="NEOVORA Deploy" -c user.email="deploy@neovora.local" commit -m "Deploy NEOVORA Audio V4.1.1 Cloud" >/dev/null
+  git -C "$TMP_DIR/repo" -c user.name="NEOVORA Deploy" -c user.email="deploy@neovora.local" commit -m "Deploy NEOVORA Audio V4.1.2 Cloud" >/dev/null
   git -C "$TMP_DIR/repo" push -u origin main
   echo "✓ GitHub 备份完成"
 else
@@ -87,7 +87,7 @@ fi
 
 sleep 4
 HEALTH_URL="$SITE_URL/api/health?deep=1"
-echo "正在验证 default AI Gateway、Whisper large-v3-turbo 与 M2M100..."
+echo "正在验证 default AI Gateway、Whisper large-v3-turbo、自动语言识别与 M2M100..."
 HEALTH_FILE="$(mktemp)"
 HTTP_CODE="$(curl -sS -o "$HEALTH_FILE" -w '%{http_code}' "$HEALTH_URL" || true)"
 HEALTH="$(cat "$HEALTH_FILE" 2>/dev/null || true)"
@@ -97,13 +97,14 @@ if [ "$HTTP_CODE" = "200" ] && echo "$HEALTH" | grep -q '"ai_ready":true'; then
   echo "✓ AI 推理链路自检通过"
   echo "✓ default AI Gateway 已就绪"
   echo "✓ Whisper large-v3-turbo 可调用"
+  echo "✓ 自动语言识别可调用"
   echo "✓ M2M100 1.2B 可调用"
 else
   echo "✗ Worker 已部署，但 AI 推理链路没有通过。"
   echo "HTTP: $HTTP_CODE"
   echo "返回内容：$HEALTH"
   echo
-  echo "V4.1.1 使用 Cloudflare 的 default AI Gateway；它应由首次经过认证的 Workers AI binding 请求自动创建。"
+  echo "V4.1.2 使用 Cloudflare 的 default AI Gateway；它应由首次经过认证的 Workers AI binding 请求自动创建。"
   echo "如果这里仍出现 2001，请把以上返回内容截图发给我，不要手工改其他配置。"
   exit 1
 fi
@@ -112,6 +113,6 @@ echo
 echo "GitHub: https://github.com/$FULL_REPO"
 echo "网站: $SITE_URL/app"
 echo
-echo "V4.1.1 Cloud 为纯公网架构，不启动任何本地 AI 服务；关闭本终端和 Mac 不影响网站。"
+echo "V4.1.2 Cloud 为纯公网架构，不启动任何本地 AI 服务；关闭本终端和 Mac 不影响网站。"
 open "$SITE_URL/app" >/dev/null 2>&1 || true
 read -r -p "部署完成。按回车关闭窗口..." _
