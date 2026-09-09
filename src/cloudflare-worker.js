@@ -1,9 +1,10 @@
 const ASR_MODEL = '@cf/openai/whisper-large-v3-turbo';
-const MT_MODEL = '@cf/meta/m2m100-1.2b';
-const LID_MODEL = '@cf/meta/llama-3.2-1b-instruct';
+const TRANSLATION_MODEL = '@cf/qwen/qwen3-30b-a3b-fp8';
+const FALLBACK_MT_MODEL = '@cf/meta/m2m100-1.2b';
+const GOOGLE_WEB_TRANSLATE_URL = 'https://translate.googleapis.com/translate_a/single';
 const GATEWAY_ID = 'default';
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const VERSION = '4.1.2';
+const VERSION = '4.1.4';
 
 const SUPPORTED_LANGS = new Set([
   'zh','en','fr','es','de','it','pt','ja','ko','ru','ar','nl','pl','tr','uk','cs','sv','fi','da','el','he','hi','id'
@@ -91,7 +92,34 @@ function detectByScript(text) {
   return '';
 }
 
-async function detectTranscriptLanguage(env, asr, transcript) {
+const LATIN_LANGUAGE_MARKERS = {
+  fr: [' le ',' la ',' les ',' des ',' de ',' du ',' un ',' une ',' et ',' est ',' sont ',' dans ',' pour ',' avec ',' que ',' qui ',' nous ',' vous ',' ils ',' elles ',' pas ',' école ',' élèves ',' enfant ',' rentrée ',' donc ',' parce ',' mais ',' très ',' être ',' on '],
+  en: [' the ',' and ',' is ',' are ',' of ',' to ',' in ',' for ',' with ',' that ',' this ',' we ',' you ',' they ',' not ',' school ',' child ',' students ',' because ',' but ',' very ',' be '],
+  es: [' el ',' la ',' los ',' las ',' de ',' del ',' un ',' una ',' y ',' es ',' son ',' en ',' para ',' con ',' que ',' nosotros ',' ustedes ',' no ',' escuela ',' niño ',' porque ',' pero ',' muy '],
+  de: [' der ',' die ',' das ',' den ',' dem ',' ein ',' eine ',' und ',' ist ',' sind ',' in ',' für ',' mit ',' dass ',' wir ',' sie ',' nicht ',' schule ',' kind ',' weil ',' aber ',' sehr '],
+  it: [' il ',' lo ',' la ',' i ',' gli ',' le ',' di ',' del ',' un ',' una ',' e ',' è ',' sono ',' in ',' per ',' con ',' che ',' noi ',' voi ',' non ',' scuola ',' bambino ',' perché ',' ma ',' molto '],
+  pt: [' o ',' a ',' os ',' as ',' de ',' do ',' da ',' um ',' uma ',' e ',' é ',' são ',' em ',' para ',' com ',' que ',' nós ',' vocês ',' não ',' escola ',' criança ',' porque ',' mas ',' muito '],
+  nl: [' de ',' het ',' een ',' en ',' is ',' zijn ',' in ',' voor ',' met ',' dat ',' wij ',' jullie ',' niet ',' school ',' kind ',' omdat ',' maar ',' zeer ']
+};
+
+function detectLatinLanguage(text) {
+  const normalized = ` ${normalizeText(text).toLowerCase().replace(/[“”«».,!?;:()]/g, ' ')} `;
+  let best = { code: '', score: 0 };
+  for (const [code, markers] of Object.entries(LATIN_LANGUAGE_MARKERS)) {
+    let score = 0;
+    for (const marker of markers) {
+      let pos = 0;
+      while ((pos = normalized.indexOf(marker, pos)) !== -1) {
+        score += marker.trim().length > 5 ? 2 : 1;
+        pos += marker.length;
+      }
+    }
+    if (score > best.score) best = { code, score };
+  }
+  return best.score >= 4 ? best.code : '';
+}
+
+async function detectTranscriptLanguage(_env, asr, transcript) {
   const directCandidates = [
     asr?.language,
     asr?.detected_language,
@@ -107,22 +135,11 @@ async function detectTranscriptLanguage(env, asr, transcript) {
   const scriptCode = detectByScript(transcript);
   if (scriptCode) return { code: scriptCode, method: 'script' };
 
-  try {
-    const sample = transcript.slice(0, 2200);
-    const lid = await runAI(env, LID_MODEL, {
-      prompt: `Detect the language of the following transcription. Return ONLY one ISO 639-1 code from this allowed list: zh,en,fr,es,de,it,pt,ja,ko,ru,ar,nl,pl,tr,uk,cs,sv,fi,da,el,he,hi,id. No punctuation, no explanation.\n\n${sample}`,
-      max_tokens: 4,
-      temperature: 0,
-      seed: 7,
-    });
-    const raw = normalizeText(lid?.response || lid?.text || '');
-    const match = raw.toLowerCase().match(/\b(zh|en|fr|es|de|it|pt|ja|ko|ru|ar|nl|pl|tr|uk|cs|sv|fi|da|el|he|hi|id)\b/);
-    if (match && SUPPORTED_LANGS.has(match[1])) return { code: match[1], method: 'cloud-language-id' };
-  } catch (_) {}
+  const latinCode = detectLatinLanguage(transcript);
+  if (latinCode) return { code: latinCode, method: 'text-heuristic' };
 
   return { code: '', method: 'unknown' };
 }
-
 function similarity(a, b) {
   a = normalizeText(a).toLowerCase();
   b = normalizeText(b).toLowerCase();
@@ -194,9 +211,10 @@ function timelineQuality(segments = [], removedRepeats = 0) {
   };
 }
 
-function splitForTranslation(text, max = 900) {
+function splitForTranslation(text, max = 3600) {
   const normalized = String(text || '').trim();
   if (!normalized) return [];
+  if (normalized.length <= max) return [normalized];
   const sentences = normalized.split(/(?<=[.!?。！？])\s+/);
   const out = [];
   let cur = '';
@@ -219,64 +237,204 @@ function splitForTranslation(text, max = 900) {
 
 function extractTranslation(result) {
   if (!result) return '';
-  if (typeof result === 'string') return result;
-  return normalizeText(result.translated_text || result.translation || result.text || result.result?.translated_text || '');
+  const raw = typeof result === 'string'
+    ? result
+    : (result.response || result.translated_text || result.translation || result.text || result.result?.translated_text || '');
+  return String(raw)
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/^```(?:text|markdown)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
 }
 
 async function runAI(env, model, input) {
   return env.AI.run(model, input, gatewayOptions());
 }
 
-async function translateText(env, text, source, target) {
-  if (!text || target === 'none') return '';
-  if (!SUPPORTED_LANGS.has(source)) throw new Error('无法可靠识别原语言，请手动选择原语言后重试翻译。');
-  if (!SUPPORTED_LANGS.has(target)) throw new Error('当前目标语言暂不受支持。');
-  if (source === target) return text;
+const TARGET_NAMES = {
+  zh: 'Simplified Chinese', en: 'English', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian',
+  pt: 'Portuguese', ja: 'Japanese', ko: 'Korean', ru: 'Russian', ar: 'Arabic', nl: 'Dutch', pl: 'Polish',
+  tr: 'Turkish', uk: 'Ukrainian', cs: 'Czech', sv: 'Swedish', fi: 'Finnish', da: 'Danish', el: 'Greek',
+  he: 'Hebrew', hi: 'Hindi', id: 'Indonesian'
+};
 
-  const chunks = splitForTranslation(text);
+function qwenTranslationMessages(chunk, source, target, context = '') {
+  const sourceName = TARGET_NAMES[source] || source;
+  const targetName = TARGET_NAMES[target] || target;
+  const contextPart = context
+    ? `\nContext from the immediately preceding source text. Use it ONLY to resolve references and terminology; DO NOT translate it again:\n---CONTEXT---\n${context}\n---END CONTEXT---\n`
+    : '';
+  return [
+    {
+      role: 'system',
+      content: `You are NEOVORA's professional ${sourceName} to ${targetName} translation engine. Translate faithfully and completely. Do not summarize, explain, omit, embellish, infer facts that are not present, or add headings. Preserve all numbers, times, names, school/administrative terminology and speaker intent. Repair only obvious spoken-language disfluencies when needed for natural ${targetName}. If the source is awkward or ambiguous, preserve the ambiguity rather than inventing meaning. Output ONLY the translation, with natural paragraphing. Never output reasoning or <think> tags.`
+    },
+    {
+      role: 'user',
+      content: `${contextPart}\nTranslate the following source text into ${targetName}:\n---SOURCE---\n${chunk}\n---END SOURCE---`
+    }
+  ];
+}
+
+
+
+function googleTargetLang(code) {
+  const map = { zh: 'zh-CN' };
+  return map[code] || code;
+}
+
+function parseGoogleTranslatePayload(payload) {
+  if (!Array.isArray(payload) || !Array.isArray(payload[0])) return '';
+  return payload[0]
+    .map(part => Array.isArray(part) ? (part[0] || '') : '')
+    .join('')
+    .trim();
+}
+
+async function translateWithGoogleWeb(text, source, target) {
+  const chunks = splitForTranslation(text, 2200);
   const results = [];
   for (const chunk of chunks) {
-    // Cloudflare M2M100 schema expects language codes such as "fr" and "zh".
-    const r = await runAI(env, MT_MODEL, {
-      text: chunk,
-      source_lang: source,
-      target_lang: target,
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const params = new URLSearchParams({
+        client: 'gtx',
+        sl: source || 'auto',
+        tl: googleTargetLang(target),
+        dt: 't',
+        q: chunk,
+      });
+      const response = await fetch(`${GOOGLE_WEB_TRANSLATE_URL}?${params.toString()}`, {
+        method: 'GET',
+        headers: {
+          'accept': 'application/json,text/plain,*/*',
+          'user-agent': 'Mozilla/5.0 NEOVORA-Audio/4.1.4',
+        },
+        signal: controller.signal,
+      });
+      if (response.status === 429) throw new Error('Google Web Translate 429 Too Many Requests');
+      if (!response.ok) throw new Error(`Google Web Translate HTTP ${response.status}`);
+      const data = await response.json();
+      const translated = parseGoogleTranslatePayload(data);
+      if (!translated) throw new Error('Google Web Translate 未返回有效译文');
+      results.push(translated);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return results.join('\n\n');
+}
+
+async function translateWithQwen(env, text, source, target) {
+  const chunks = splitForTranslation(text);
+  const results = [];
+  let previousContext = '';
+  for (const chunk of chunks) {
+    const estimatedMaxTokens = Math.min(4096, Math.max(768, Math.ceil(chunk.length * 1.6)));
+    const r = await runAI(env, TRANSLATION_MODEL, {
+      messages: qwenTranslationMessages(chunk, source, target, previousContext),
+      max_tokens: estimatedMaxTokens,
+      temperature: 0.1,
+      top_p: 0.9,
+      repetition_penalty: 1.05,
+      seed: 17,
     });
     const t = extractTranslation(r);
-    if (!t) throw new Error('翻译模型未返回有效文本。');
+    if (!t) throw new Error('高质量翻译模型未返回有效文本。');
+    results.push(t);
+    previousContext = chunk.slice(-700);
+  }
+  return results.join('\n\n');
+}
+
+async function translateWithFallback(env, text, source, target) {
+  const chunks = splitForTranslation(text, 1200);
+  const results = [];
+  for (const chunk of chunks) {
+    const r = await runAI(env, FALLBACK_MT_MODEL, { text: chunk, source_lang: source, target_lang: target });
+    const t = extractTranslation(r);
+    if (!t) throw new Error('备用翻译模型未返回有效文本。');
     results.push(t);
   }
   return results.join('\n\n');
 }
 
+async function translateText(env, text, source, target) {
+  if (!text || target === 'none') return { text: '', engine: null, fallback: false };
+  if (!SUPPORTED_LANGS.has(source)) throw new Error('无法可靠识别原语言，请手动选择原语言后重试翻译。');
+  if (!SUPPORTED_LANGS.has(target)) throw new Error('当前目标语言暂不受支持。');
+  if (source === target) return { text, engine: 'same-language', fallback: false };
+
+  let googleError = null;
+  try {
+    const translated = await translateWithGoogleWeb(text, source, target);
+    return { text: translated, engine: 'google-web', fallback: false };
+  } catch (e) {
+    googleError = e;
+  }
+
+  let qwenError = null;
+  try {
+    const translated = await translateWithQwen(env, text, source, target);
+    return {
+      text: translated,
+      engine: 'quality',
+      fallback: true,
+      primary_error: String(googleError?.message || googleError),
+    };
+  } catch (e) {
+    qwenError = e;
+  }
+
+  try {
+    const translated = await translateWithFallback(env, text, source, target);
+    return {
+      text: translated,
+      engine: 'fallback',
+      fallback: true,
+      primary_error: String(googleError?.message || googleError),
+      secondary_error: String(qwenError?.message || qwenError),
+    };
+  } catch (fallbackError) {
+    throw new Error(`Google Web、Qwen3 与 M2M100 翻译均失败：${String(googleError?.message || googleError)} / ${String(qwenError?.message || qwenError)} / ${String(fallbackError?.message || fallbackError)}`);
+  }
+}
 async function deepHealth(env) {
   const started = Date.now();
-  const checks = { gateway: GATEWAY_ID, translation: false, asr: false, language_detection: false };
+  const checks = { gateway: GATEWAY_ID, google_web_translation: null, quality_translation: false, fallback_translation: null, asr: false };
   try {
-    const translated = await runAI(env, MT_MODEL, { text: 'Bonjour', source_lang: 'fr', target_lang: 'en' });
-    checks.translation = Boolean(extractTranslation(translated));
-    const lidProbe = await runAI(env, LID_MODEL, { prompt: 'Return only the ISO 639-1 language code for: Bonjour tout le monde', max_tokens: 4, temperature: 0, seed: 7 });
-    checks.language_detection = /\bfr\b/i.test(normalizeText(lidProbe?.response || lidProbe?.text || ''));
+    try {
+      checks.google_web_translation = Boolean(await translateWithGoogleWeb('Bonjour, les élèves arrivent à 8h20.', 'fr', 'zh'));
+    } catch (e) {
+      checks.google_web_translation = false;
+      checks.google_web_error = String(e?.message || e);
+    }
+    const qwen = await runAI(env, TRANSLATION_MODEL, {
+      messages: qwenTranslationMessages('Bonjour, les élèves arrivent à 8h20.', 'fr', 'zh'),
+      max_tokens: 128,
+      temperature: 0.1,
+      seed: 17,
+    });
+    checks.quality_translation = Boolean(extractTranslation(qwen));
     await runAI(env, ASR_MODEL, {
       audio: createProbeWavBase64(), task: 'transcribe', vad_filter: true,
       condition_on_previous_text: false, no_speech_threshold: 0.6,
     });
     checks.asr = true;
+    const ready = checks.quality_translation && checks.asr;
     return {
-      ok: checks.translation && checks.asr && checks.language_detection,
-      ai_ready: checks.translation && checks.asr && checks.language_detection,
-      version: VERSION,
-      architecture: 'public-cloud', gateway: GATEWAY_ID, checks,
+      ok: ready, ai_ready: ready, version: VERSION,
+      architecture: 'public-cloud-free-hybrid', gateway: GATEWAY_ID, checks,
       latency_ms: Date.now() - started,
     };
   } catch (e) {
     return {
-      ok: false, ai_ready: false, version: VERSION, architecture: 'public-cloud', gateway: GATEWAY_ID,
+      ok: false, ai_ready: false, version: VERSION, architecture: 'public-cloud-free-hybrid', gateway: GATEWAY_ID,
       checks, error: String(e?.message || e), latency_ms: Date.now() - started,
     };
   }
 }
-
 async function handleProcess(request, env) {
   const form = await request.formData();
   const file = form.get('file');
@@ -334,9 +492,16 @@ async function handleProcess(request, env) {
 
   let translation = '';
   let translation_error = '';
+  let translation_engine = null;
+  let translation_fallback = false;
   if (target !== 'none') {
     try {
-      translation = await translateText(env, transcript, effectiveSource, target);
+      const translatedResult = await translateText(env, transcript, effectiveSource, target);
+      translation = translatedResult.text;
+      translation_engine = translatedResult.engine;
+      translation_fallback = Boolean(translatedResult.fallback);
+      if (translation_engine === 'quality') warnings.push('Google 免费翻译节点本次不可用，已自动切换到高质量备用翻译。');
+      if (translation_engine === 'fallback') warnings.push('Google 与高质量备用节点均不可用，本次已使用基础翻译兜底。');
     } catch (e) {
       translation_error = String(e?.message || e);
     }
@@ -345,8 +510,8 @@ async function handleProcess(request, env) {
   return json({
     ok: true,
     version: VERSION,
-    provider: 'cloudflare-workers-ai', gateway: GATEWAY_ID,
-    asr_model: ASR_MODEL, translation_model: MT_MODEL, language_detection_model: LID_MODEL,
+    provider: 'hybrid-free-google-cloudflare', gateway: GATEWAY_ID,
+    asr_model: ASR_MODEL, primary_translation: 'google-web-unofficial', translation_model: TRANSLATION_MODEL, fallback_translation_model: FALLBACK_MT_MODEL,
     source_requested: sourceRequested,
     detected_language: effectiveSource || null,
     detected_language_label: effectiveSource ? (LANG_LABELS[effectiveSource] || effectiveSource) : null,
@@ -354,6 +519,8 @@ async function handleProcess(request, env) {
     transcript,
     translation,
     translation_error,
+    translation_engine,
+    translation_fallback,
     segments: cleaned,
     vtt: asr?.vtt || '',
     warnings: [...new Set(warnings)],
@@ -373,7 +540,7 @@ export default {
       }
       return json({
         ok: true, ai_ready: null, version: VERSION, architecture: 'public-cloud', gateway: GATEWAY_ID,
-        asr: ASR_MODEL, translation: MT_MODEL, local_runtime_required: false,
+        asr: ASR_MODEL, translation_primary: 'google-web-unofficial', translation: TRANSLATION_MODEL, fallback_translation: FALLBACK_MT_MODEL, local_runtime_required: false,
       });
     }
     if (url.pathname === '/api/process' && request.method === 'POST') {
