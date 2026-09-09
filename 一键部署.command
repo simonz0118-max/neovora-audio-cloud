@@ -5,6 +5,10 @@ cd "$(dirname "$0")"
 PROJECT_DIR="$PWD"
 REPO_NAME="neovora-audio-cloud"
 
+cleanup(){
+  [ -n "${TMP_DIR:-}" ] && rm -rf "$TMP_DIR" || true
+}
+trap cleanup EXIT
 trap 'echo; echo "部署中止。错误发生在第 $LINENO 行。请把终端最后 30 行截图发给我。"; read -r -p "按回车关闭窗口..." _' ERR
 
 line(){ printf '\n============================================================\n%s\n============================================================\n' "$1"; }
@@ -24,7 +28,6 @@ npm -v
 line "2/5 安装依赖并构建"
 npm install
 npm run build
-
 echo "✓ 网站构建成功"
 
 line "3/5 GitHub 自动备份"
@@ -35,7 +38,6 @@ fi
 GH_USER="$(gh api user --jq .login)"
 FULL_REPO="$GH_USER/$REPO_NAME"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
 
 if gh repo view "$FULL_REPO" >/dev/null 2>&1; then
   gh repo clone "$FULL_REPO" "$TMP_DIR/repo" -- --quiet
@@ -52,12 +54,13 @@ rsync -a --delete \
   --exclude 'node_modules/' \
   --exclude 'dist/' \
   --exclude '.wrangler/' \
+  --exclude '.runtime/' \
   --exclude '.DS_Store' \
   "$PROJECT_DIR/" "$TMP_DIR/repo/"
 
 git -C "$TMP_DIR/repo" add -A
 if ! git -C "$TMP_DIR/repo" diff --cached --quiet; then
-  git -C "$TMP_DIR/repo" -c user.name="NEOVORA Deploy" -c user.email="deploy@neovora.local" commit -m "Deploy NEOVORA Audio V4.1 Cloud" >/dev/null
+  git -C "$TMP_DIR/repo" -c user.name="NEOVORA Deploy" -c user.email="deploy@neovora.local" commit -m "Deploy NEOVORA Audio V4.1.1 Cloud" >/dev/null
   git -C "$TMP_DIR/repo" push -u origin main
   echo "✓ GitHub 备份完成"
 else
@@ -74,28 +77,41 @@ DEPLOY_LOG="$(mktemp)"
 npx wrangler deploy 2>&1 | tee "$DEPLOY_LOG"
 SITE_URL="$(grep -Eo 'https://[^ ]+\.workers\.dev' "$DEPLOY_LOG" | tail -1 || true)"
 rm -f "$DEPLOY_LOG"
-
 echo "✓ Cloudflare Worker + Workers AI 已部署"
 
-line "5/5 公网健康检查"
-if [ -n "$SITE_URL" ]; then
-  sleep 3
-  HEALTH="$(curl -fsS "$SITE_URL/api/health" || true)"
-  if echo "$HEALTH" | grep -q '"ok":true'; then
-    echo "✓ 公网 AI 节点健康检查通过"
-  else
-    echo "⚠ Worker 已部署，但健康检查未确认成功。"
-    echo "返回内容：$HEALTH"
-  fi
+line "5/5 公网 AI Gateway + 模型深度自检"
+if [ -z "$SITE_URL" ]; then
+  echo "✗ Wrangler 已部署，但无法解析 workers.dev 地址，不能完成 AI 自检。"
+  exit 1
+fi
+
+sleep 4
+HEALTH_URL="$SITE_URL/api/health?deep=1"
+echo "正在验证 default AI Gateway、Whisper large-v3-turbo 与 M2M100..."
+HEALTH_FILE="$(mktemp)"
+HTTP_CODE="$(curl -sS -o "$HEALTH_FILE" -w '%{http_code}' "$HEALTH_URL" || true)"
+HEALTH="$(cat "$HEALTH_FILE" 2>/dev/null || true)"
+rm -f "$HEALTH_FILE"
+
+if [ "$HTTP_CODE" = "200" ] && echo "$HEALTH" | grep -q '"ai_ready":true'; then
+  echo "✓ AI 推理链路自检通过"
+  echo "✓ default AI Gateway 已就绪"
+  echo "✓ Whisper large-v3-turbo 可调用"
+  echo "✓ M2M100 1.2B 可调用"
 else
-  echo "⚠ Wrangler 已部署成功，但未能从终端输出自动解析 workers.dev 地址。"
+  echo "✗ Worker 已部署，但 AI 推理链路没有通过。"
+  echo "HTTP: $HTTP_CODE"
+  echo "返回内容：$HEALTH"
+  echo
+  echo "V4.1.1 使用 Cloudflare 的 default AI Gateway；它应由首次经过认证的 Workers AI binding 请求自动创建。"
+  echo "如果这里仍出现 2001，请把以上返回内容截图发给我，不要手工改其他配置。"
+  exit 1
 fi
 
 echo
 echo "GitHub: https://github.com/$FULL_REPO"
-if [ -n "$SITE_URL" ]; then echo "网站: $SITE_URL/app"; fi
+echo "网站: $SITE_URL/app"
 echo
-echo "V4.1 Cloud 不启动任何本地 AI 服务；关闭本终端和 Mac 都不影响已部署网站。"
-if [ -n "$SITE_URL" ]; then open "$SITE_URL/app" >/dev/null 2>&1 || true; fi
-
+echo "V4.1.1 Cloud 为纯公网架构，不启动任何本地 AI 服务；关闭本终端和 Mac 不影响网站。"
+open "$SITE_URL/app" >/dev/null 2>&1 || true
 read -r -p "部署完成。按回车关闭窗口..." _

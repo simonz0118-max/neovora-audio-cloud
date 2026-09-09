@@ -1,5 +1,6 @@
 const ASR_MODEL = '@cf/openai/whisper-large-v3-turbo';
 const MT_MODEL = '@cf/meta/m2m100-1.2b';
+const GATEWAY_ID = 'default';
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 const LANG_NAMES = {
@@ -8,6 +9,13 @@ const LANG_NAMES = {
   pl: 'polish', tr: 'turkish', uk: 'ukrainian', cs: 'czech', sv: 'swedish', fi: 'finnish',
   da: 'danish', el: 'greek', he: 'hebrew', hi: 'hindi', id: 'indonesian'
 };
+
+const gatewayOptions = () => ({
+  gateway: {
+    id: GATEWAY_ID,
+    skipCache: true,
+  },
+});
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'cache-control': 'no-store' } });
@@ -21,6 +29,32 @@ function toBase64(buffer) {
     binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + step, bytes.length)));
   }
   return btoa(binary);
+}
+
+function createProbeWavBase64() {
+  const sampleRate = 16000;
+  const durationSeconds = 0.25;
+  const samples = Math.floor(sampleRate * durationSeconds);
+  const dataBytes = samples * 2;
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+  const writeAscii = (offset, value) => {
+    for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+  };
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + dataBytes, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, dataBytes, true);
+  return toBase64(buffer);
 }
 
 function normalizeText(text = '') {
@@ -94,22 +128,67 @@ function extractTranslation(result) {
   return normalizeText(result.translated_text || result.translation || result.text || result.result?.translated_text || '');
 }
 
+async function runAI(env, model, input) {
+  return env.AI.run(model, input, gatewayOptions());
+}
+
 async function translateText(env, text, source, target) {
   if (!text || target === 'none' || source === target) return source === target ? text : '';
-  if (source === 'auto') throw new Error('自动检测可用于转写；当前公网翻译请明确选择原语言，以保证翻译方向正确。');
+  if (source === 'auto') throw new Error('自动检测可用于转写；需要翻译时请明确选择原语言，以保证翻译方向正确。');
   const chunks = splitForTranslation(text);
   const results = [];
   for (const chunk of chunks) {
-    const r = await env.AI.run(MT_MODEL, {
+    const r = await runAI(env, MT_MODEL, {
       text: chunk,
       source_lang: LANG_NAMES[source] || source,
-      target_lang: LANG_NAMES[target] || target
-    }, { gateway: { id: 'neovora-audio' } });
+      target_lang: LANG_NAMES[target] || target,
+    });
     const t = extractTranslation(r);
     if (!t) throw new Error('翻译模型未返回有效文本');
     results.push(t);
   }
   return results.join('\n\n');
+}
+
+async function deepHealth(env) {
+  const started = Date.now();
+  const checks = { gateway: GATEWAY_ID, translation: false, asr: false };
+  try {
+    const translated = await runAI(env, MT_MODEL, {
+      text: 'Hello', source_lang: 'english', target_lang: 'french',
+    });
+    checks.translation = Boolean(extractTranslation(translated));
+
+    await runAI(env, ASR_MODEL, {
+      audio: createProbeWavBase64(),
+      task: 'transcribe',
+      vad_filter: true,
+      condition_on_previous_text: false,
+      no_speech_threshold: 0.6,
+    });
+    checks.asr = true;
+
+    return {
+      ok: checks.translation && checks.asr,
+      ai_ready: checks.translation && checks.asr,
+      version: '4.1.1',
+      architecture: 'public-cloud',
+      gateway: GATEWAY_ID,
+      checks,
+      latency_ms: Date.now() - started,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      ai_ready: false,
+      version: '4.1.1',
+      architecture: 'public-cloud',
+      gateway: GATEWAY_ID,
+      checks,
+      error: String(e?.message || e),
+      latency_ms: Date.now() - started,
+    };
+  }
 }
 
 async function handleProcess(request, env) {
@@ -121,7 +200,7 @@ async function handleProcess(request, env) {
 
   if (!(file instanceof File)) return json({ ok: false, error: 'missing_file', detail: '请选择音频文件。' }, 400);
   if (file.size <= 0) return json({ ok: false, error: 'empty_file', detail: '文件为空。' }, 400);
-  if (file.size > MAX_FILE_BYTES) return json({ ok: false, error: 'file_too_large', detail: 'V4.1 Cloud 首版单文件上限 20 MB。长音频分块队列将在下一阶段加入。' }, 413);
+  if (file.size > MAX_FILE_BYTES) return json({ ok: false, error: 'file_too_large', detail: 'V4.1.1 Cloud 单文件上限 20 MB。长音频分块队列将在下一阶段加入。' }, 413);
 
   const audio = toBase64(await file.arrayBuffer());
   const payload = {
@@ -133,15 +212,23 @@ async function handleProcess(request, env) {
     no_speech_threshold: 0.6,
     compression_ratio_threshold: 2.4,
     log_prob_threshold: -1,
-    hallucination_silence_threshold: 1.0
+    hallucination_silence_threshold: 1.0,
   };
   if (source !== 'auto') payload.language = source;
 
   let asr;
   try {
-    asr = await env.AI.run(ASR_MODEL, payload, { gateway: { id: 'neovora-audio' } });
+    asr = await runAI(env, ASR_MODEL, payload);
   } catch (e) {
-    return json({ ok: false, error: 'asr_failed', detail: `Cloudflare Whisper 处理失败：${e?.message || e}` }, 502);
+    const message = String(e?.message || e);
+    const gatewayHint = /2001|gateway/i.test(message)
+      ? 'AI Gateway 未就绪。V4.1.1 已改用可自动创建的 default Gateway；请重新运行一键部署并确认最后的“AI 推理链路自检通过”。'
+      : '';
+    return json({
+      ok: false,
+      error: 'asr_failed',
+      detail: `Cloudflare Whisper 处理失败：${message}${gatewayHint ? `\n${gatewayHint}` : ''}`,
+    }, 502);
   }
 
   const rawText = normalizeText(asr?.text || asr?.transcription_info?.text || '');
@@ -162,8 +249,9 @@ async function handleProcess(request, env) {
 
   return json({
     ok: true,
-    version: '4.1.0',
+    version: '4.1.1',
     provider: 'cloudflare-workers-ai',
+    gateway: GATEWAY_ID,
     asr_model: ASR_MODEL,
     translation_model: MT_MODEL,
     transcript,
@@ -172,7 +260,7 @@ async function handleProcess(request, env) {
     segments: cleaned,
     vtt: asr?.vtt || '',
     warnings,
-    word_count: asr?.word_count || asr?.transcription_info?.word_count || null
+    word_count: asr?.word_count || asr?.transcription_info?.word_count || null,
   });
 }
 
@@ -180,14 +268,23 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/api/health') {
+      if (!env.AI) {
+        return json({ ok: false, ai_ready: false, version: '4.1.1', error: 'Cloudflare Workers AI binding 未配置。' }, 503);
+      }
+      if (url.searchParams.get('deep') === '1') {
+        const result = await deepHealth(env);
+        return json(result, result.ok ? 200 : 503);
+      }
       return json({
-        ok: Boolean(env.AI),
-        version: '4.1.0',
+        ok: true,
+        ai_ready: null,
+        version: '4.1.1',
         architecture: 'public-cloud',
+        gateway: GATEWAY_ID,
         asr: ASR_MODEL,
         translation: MT_MODEL,
-        local_runtime_required: false
-      }, env.AI ? 200 : 503);
+        local_runtime_required: false,
+      });
     }
     if (url.pathname === '/api/process' && request.method === 'POST') {
       if (!env.AI) return json({ ok: false, error: 'ai_binding_missing', detail: 'Cloudflare Workers AI binding 未配置。' }, 503);
@@ -195,5 +292,5 @@ export default {
     }
     if (url.pathname.startsWith('/api/')) return json({ ok: false, error: 'not_found' }, 404);
     return env.ASSETS.fetch(request);
-  }
+  },
 };
